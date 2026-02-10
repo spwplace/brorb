@@ -87,6 +87,7 @@ export class Dashboard {
             pco2:    new Float32Array(600),
             hr:      new Float32Array(600),
             spo2:    new Float32Array(600),
+            map:     new Float32Array(600),
         };
         this.writeIdx = 0;
 
@@ -405,7 +406,7 @@ export class Dashboard {
         miBtn.textContent = 'Heart Attack';
         miBtn.style.color = C.rose;
         miBtn.addEventListener('click', () => {
-            if (this.sim) this.sim.triggerHeartAttack(0.25);
+            if (this.sim) this.sim.triggerHeartAttack(0.7);
         });
         evtBtns.appendChild(miBtn);
 
@@ -466,6 +467,7 @@ export class Dashboard {
         this.bufs.pco2[i]    = state.pco2 ?? 40;
         this.bufs.hr[i]      = state.heart_rate ?? 70;
         this.bufs.spo2[i]    = (state.spo2 ?? 0.98) * 100;
+        this.bufs.map[i]     = state.map ?? 93;
         this.writeIdx++;
 
         // ECG — morphology depends on cardiac rhythm
@@ -957,12 +959,21 @@ export class Dashboard {
         ctx.fillText(`${spo2Pct.toFixed(0)}%`, x + 45, y);
         y += lineH;
 
-        // Cardiac output
+        // MAP + CO on one line
         ctx.font = monoSm;
         ctx.fillStyle = C.label;
-        ctx.fillText('CO', x, y);
+        ctx.fillText('MAP', x, y);
+        const mapVal = state.map ?? 93;
+        const mapColor = mapVal >= 60 ? C.dim : mapVal >= 40 ? '#e8c040' : C.rose;
+        ctx.fillStyle = mapColor;
+        ctx.font = mono;
+        ctx.fillText(`${mapVal.toFixed(0)}`, x + 30, y);
+        ctx.fillStyle = C.label;
+        ctx.font = monoSm;
+        ctx.fillText('CO', x + 65, y);
         ctx.fillStyle = C.dim;
-        ctx.fillText(`${(state.cardiac_output ?? 5).toFixed(1)} L/m`, x + 45, y);
+        ctx.font = mono;
+        ctx.fillText(`${(state.cardiac_output ?? 5).toFixed(1)}`, x + 85, y);
         y += lineH;
 
         // Sympathetic / Vagal tones
@@ -1002,6 +1013,7 @@ export class Dashboard {
             { buf: this.bufs.pco2,    color: '#60b840', label: 'CO\u2082', min: 30, max: 50 },
             { buf: this.bufs.hr,      color: '#e06070', label: 'HR', min: 40, max: 120 },
             { buf: this.bufs.spo2,    color: '#4080d0', label: 'SpO\u2082', min: 50, max: 100 },
+            { buf: this.bufs.map,     color: '#e06070', label: 'MAP', min: 0, max: 150 },
         ];
 
         const chH = h / channels.length;

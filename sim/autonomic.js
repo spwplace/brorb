@@ -6,15 +6,20 @@
  *
  * Sympathetic output:
  *   - Tonic baseline (~0.3)
- *   - Excited by chemoreceptors (hypoxia + hypercapnia)
- *   - Inhibited by baroreceptors (high cardiac output → less sympathetic)
+ *   - Excited by chemoreceptors (hypoxia + hypercapnia via NTS → RVLM)
+ *   - Inhibited by baroreceptors (high MAP → less sympathetic)
  *   → Heart: positive chronotropic (↑HR) + inotropic (↑SV)
+ *   → Vasculature: vasoconstriction (↑TPR) via hemodynamics.js
  *
  * Vagal modulation:
- *   - Baroreflex: high CO → more vagal tone
+ *   - Baroreflex: high MAP → more vagal tone (Guyton Ch. 18)
  *   - Hypoxic vagal surge: PaO2 < 30 mmHg → massive vagal activation
  *     → terminal bradycardia preceding asystole (Bezold-Jarisch-like)
  *   → Adjusts CVMN tonic drive (d_vagal)
+ *
+ * Baroreceptors sense MAP (mean arterial pressure), not cardiac output.
+ * This is critical: sympathetic vasoconstriction raises TPR → MAP, which
+ * the baroreflex reads as "pressure restored", completing the loop.
  *
  * The CVMN itself (with CPG-driven RSA) lives in heart.js.
  * This module provides the slower autonomic modulation on top.
@@ -36,25 +41,27 @@ export function defaultAutonomicParams() {
         // Both hypoxia and hypercapnia activate sympathetic via NTS → RVLM
         chemoSympatheticGain: 0.4,
 
-        // Baroreflex (cardiac output as pressure proxy)
-        // High CO → baroreceptor activation → inhibit sympathetic, excite vagal
-        // Low CO → baroreceptor unloading → excite sympathetic, inhibit vagal
-        baroGain: 0.3,
-        baroSetpoint: 5.0,        // normal cardiac output, L/min
-        tauBaro: 2.0,             // baroreflex time constant, s
+        // Baroreflex from MAP (Guyton Ch. 18)
+        // Baroreceptors in carotid sinus sense wall tension ∝ MAP.
+        // High MAP → inhibit sympathetic, excite vagal.
+        // Low MAP → excite sympathetic, inhibit vagal.
+        // Gain calibrated: 37 mmHg drop (CO 5→3, MAP 93→56) gives
+        // sympathetic boost of ~0.6, matching old CO-based model.
+        baroGain: 0.016,              // per mmHg deviation from setpoint
+        baroSetpoint: 93.0,           // mmHg, normal MAP
+        tauBaro: 2.0,                 // baroreflex time constant, s
 
         // Vagal modulation from baroreflex
-        baroVagalGain: 0.15,      // d_vagal adjustment per L/min deviation
+        baroVagalGain: 0.004,         // d_vagal adjustment per mmHg deviation
 
         // Hypoxic vagal surge (terminal)
         // Severe hypoxia → direct vagal activation → profound bradycardia
-        // This is the pathway from hypoxia → asystole
         hypoxicVagalThreshold: 30.0,  // PaO2 mmHg below which surge activates
         hypoxicVagalGain: 1.5,        // max vagal drive increase
 
         // Smoothing
-        tauSympathetic: 3.0,      // sympathetic response time, s
-        tauVagalMod: 2.0,         // vagal modulation response time, s
+        tauSympathetic: 3.0,          // sympathetic response time, s
+        tauVagalMod: 2.0,             // vagal modulation response time, s
     };
 }
 
@@ -63,28 +70,27 @@ export function defaultAutonomicParams() {
  * @param {number} dt - timestep, s
  * @param {number} chemoDrive - total chemoreceptor drive (CO2 + O2)
  * @param {number} pao2 - arterial PO2, mmHg
- * @param {number} cardiacOutput - cardiac output, L/min
+ * @param {number} map - mean arterial pressure, mmHg
  * @param {object} p - autonomic params
  */
-export function stepAutonomic(state, dt, chemoDrive, pao2, cardiacOutput, p) {
+export function stepAutonomic(state, dt, chemoDrive, pao2, map, p) {
     // ── Sympathetic tone ──────────────────────────────
-    // Excited by chemoreceptors, inhibited by baroreceptors
-    const coDeviation = cardiacOutput - p.baroSetpoint;
+    // Excited by chemoreceptors, inhibited by baroreceptors (MAP)
+    const mapDeviation = map - p.baroSetpoint;
     const sympatheticTarget = Math.max(0, Math.min(1,
         p.baseSympathetic
         + p.chemoSympatheticGain * chemoDrive        // chemoreflex excitation
-        - p.baroGain * coDeviation                   // baroreflex inhibition
+        - p.baroGain * mapDeviation                  // baroreflex inhibition
     ));
 
     const alphaSym = 1 - Math.exp(-dt / p.tauSympathetic);
     state.sympatheticTone += (sympatheticTarget - state.sympatheticTone) * alphaSym;
 
     // ── Vagal modulation ──────────────────────────────
-    // Baroreflex: high CO → increase vagal tone (via NTS → NA pathway)
-    const baroVagal = p.baroVagalGain * coDeviation;
+    // Baroreflex: high MAP → increase vagal tone (via NTS → NA pathway)
+    const baroVagal = p.baroVagalGain * mapDeviation;
 
     // Hypoxic vagal surge: severe hypoxia → massive vagal activation
-    // Smooth onset below threshold using quadratic ramp
     let hypoxicVagal = 0;
     if (pao2 < p.hypoxicVagalThreshold) {
         const frac = (p.hypoxicVagalThreshold - pao2) / p.hypoxicVagalThreshold;

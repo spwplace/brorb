@@ -90,9 +90,13 @@ function hillSaturation(pao2, p50, n) {
     return pn / (pn + p50n);
 }
 
-export function stepChemo(state, dt, ventilation, p) {
+export function stepChemo(state, dt, ventilation, perfusionFactor, p) {
+    // V/Q coupling: effective gas exchange requires both ventilation AND
+    // pulmonary blood flow. perfusionFactor = min(1, CO / normalCO).
+    const effectiveExchange = ventilation * perfusionFactor;
+
     // ── CO2 dynamics ──────────────────────────────────
-    const dpaco2 = p.co2Production - p.co2Clearance * ventilation * state.paco2;
+    const dpaco2 = p.co2Production - p.co2Clearance * effectiveExchange * state.paco2;
     state.paco2 = Math.max(0, state.paco2 + dpaco2 * dt);
 
     // Central: brain tissue CO2 tracks arterial with slow time constant
@@ -109,8 +113,8 @@ export function stepChemo(state, dt, ventilation, p) {
     state.peripheralDrive += (Math.min(periCo2Raw, p.chemoSaturation) - state.peripheralDrive) * alphaP;
 
     // ── O2 dynamics ───────────────────────────────────
-    // Ventilation raises PaO2 toward alveolar PO2; metabolism consumes it
-    const dpao2 = p.o2Clearance * ventilation * (p.alveolarPo2 - state.pao2) - p.o2Consumption;
+    // Gas exchange raises PaO2 toward alveolar PO2; metabolism consumes it
+    const dpao2 = p.o2Clearance * effectiveExchange * (p.alveolarPo2 - state.pao2) - p.o2Consumption;
     state.pao2 = Math.max(0, state.pao2 + dpao2 * dt);
 
     // Oxyhemoglobin saturation (Hill equation)
@@ -128,14 +132,22 @@ export function stepChemo(state, dt, ventilation, p) {
 /**
  * Map chemoreceptor output to CPG tonic drive offsets.
  *
- * Central chemo → RTN → d1 (inspiratory) + d5 (active expiration)
- * Peripheral chemo (CO2 + O2) → NTS → d1 (inspiratory, fast modulation)
+ * Central chemo → RTN → d1 (inspiratory) + d3 (post-I) + d5 (active expiration)
+ * Peripheral chemo (CO2 + O2) → NTS → d1 (inspiratory) + d3 (post-I)
+ *
+ * drive_3 (post-I excitation) is critical: when the CPG is stuck in
+ * inspiration, rising CO2 must help post-I neurons overcome early-I
+ * inhibition to terminate the breath. Without this, chemo → drive_1
+ * creates a positive feedback loop (stuck inspiration → rising CO2 →
+ * more inspiratory drive → more stuck).
  */
 export function chemoCpgDrives(state) {
     return {
-        drive_1: state.centralDrive * 0.4
-               + state.peripheralDrive * 0.5
-               + state.hypoxicDrive * 0.6,    // hypoxia strongly drives inspiration
+        drive_1: state.centralDrive * 0.2
+               + state.peripheralDrive * 0.3
+               + state.hypoxicDrive * 0.6,
+        drive_3: state.centralDrive * 0.3
+               + state.peripheralDrive * 0.2,
         drive_5: state.centralDrive * 0.3,
     };
 }

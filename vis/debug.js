@@ -7,7 +7,7 @@ export class DebugPanel {
     constructor() {
         this.visible = false;
         this.W = 320;
-        this.H = 420;
+        this.H = 435;
 
         this.canvas = document.createElement('canvas');
         this.canvas.id = 'debug-canvas';
@@ -210,5 +210,7 @@ export class DebugPanel {
         ctx.fillText(`Chemo: ${(state.chemo_drive || 0).toFixed(3)}  Vagal: ${(state.vagal_tone || 0).toFixed(2)}  Symp: ${(state.sympathetic_tone || 0).toFixed(2)}`, 8, y + 2);
         y += 12;
         ctx.fillText(`SpO2: ${((state.spo2 || 0.98) * 100).toFixed(0)}%  CO: ${(state.cardiac_output || 5).toFixed(1)}L/m  Perf: ${(state.cerebral_perfusion || 1).toFixed(2)}`, 8, y + 2);
+        y += 12;
+        ctx.fillText(`MAP: ${(state.map || 93).toFixed(0)}mmHg  TPR: ${(state.tpr || 18.6).toFixed(1)}  CoroF: ${(state.coronary_flow || 250).toFixed(0)}  Isch: ${(state.ischemia_factor || 1).toFixed(2)}`, 8, y + 2);
     }
 }

@@ -1,7 +1,7 @@
 /**
  * Heart rate model with respiratory sinus arrhythmia (RSA),
- * sympathetic/parasympathetic dual innervation, cardiac output,
- * and arrhythmia state machine.
+ * sympathetic/parasympathetic dual innervation, Frank-Starling
+ * stroke volume, and arrhythmia state machine.
  *
  * The cardiac vagal motor neuron (CVMN) in the nucleus ambiguus is
  * modeled as a neural population receiving synaptic input from the
@@ -16,11 +16,19 @@
  *
  * HR = intrinsicHr - vagalDepth * f(CVMN) + sympatheticHrGain * sympathetic + noise
  *
- * Cardiac output (CO) = HR × SV, where SV is modulated by sympathetic
- * inotropic effect and ischemia. CO feeds back to cerebral perfusion
- * (in simulation.js) and baroreceptors (in autonomic.js).
+ * Stroke volume: Frank-Starling mechanism (Guyton Ch. 9).
+ *   SV = contractility × SVmax × starling(fillingTime) × afterloadPenalty
+ *   - fillingTime = 60/HR - systoleDuration (faster HR → less filling → less SV)
+ *   - contractility = (1 + inotropicGain × sympathetic) × ischemiaFactor
+ *   - afterloadPenalty: higher MAP makes ejection harder
+ *
+ * This makes VT devastating: HR 180 → fillingTime 0.03s → SV ~7 mL → CO ~1.3 L/min
+ *
+ * Cardiac output (CO) = HR × SV / 1000 (L/min).
+ * CO feeds back to MAP (hemodynamics.js) and baroreceptors (autonomic.js).
  *
  * Rhythm state machine: normal → vt → vf → asystole
+ * Ischemia factor is owned by hemodynamics.js (coronary perfusion model).
  */
 
 export class HeartState {
@@ -35,13 +43,10 @@ export class HeartState {
         this._inInsp = false;
         this.stressIndex = 0.2;
 
-        // Cardiac mechanics
+        // Cardiac mechanics (Frank-Starling)
         this.strokeVolume = 70.0;    // mL per beat
         this.cardiacOutput = 5.0;    // L/min
-
-        // Ischemia / cardiac events
-        this.ischemiaFactor = 1.0;   // 1.0 = healthy, 0 = dead myocardium
-        this._ischemiaTarget = 1.0;  // for smooth ramping
+        this.contractility = 1.0;    // sympathetic × ischemia
 
         // Rhythm state machine
         this.cardiacRhythm = 'normal';  // 'normal' | 'vt' | 'vf' | 'asystole'
@@ -55,7 +60,6 @@ export function defaultHeartParams() {
         intrinsicHr: 100.0,
 
         // Cardiac vagal motor neuron (nucleus ambiguus) parameters
-        // Output saturates at [0, 1] (firing rate bound).
         g_postI_cvmn: 0.15,  // post-I → CVMN excitation (Gilbey et al. 1984)
         g_preI_cvmn: 0.25,   // pre-I/I → CVMN inhibition (vagal withdrawal)
         d_vagal: 0.65,       // tonic excitatory drive → resting vagal tone
@@ -67,18 +71,19 @@ export function defaultHeartParams() {
         // Sympathetic effect on heart rate (chronotropic)
         sympatheticHrGain: 40.0,  // max HR increase from sympathetic, bpm
 
-        // Stroke volume
-        baseSV: 70.0,              // mL, normal stroke volume
-        sympatheticSvGain: 0.3,    // fractional SV increase (inotropic)
+        // ── Frank-Starling SV parameters (Guyton Ch. 9) ────
+        svMax: 120.0,              // mL, maximum SV at full preload
+        preloadRef: 0.6,           // s, filling time reference for Starling curve
+        systoleDuration: 0.3,      // s, approx constant systolic interval
+        inotropicGain: 0.4,        // fractional contractility increase from sympathetic
+        afterloadGain: 0.3,        // SV reduction factor for elevated MAP
+        afterloadRef: 93.0,        // mmHg, reference MAP for afterload
 
         // Noise
         noiseAmp: 0.5,
 
         // Stress index smoothing
         tauStress: 10.0,
-
-        // Ischemia ramp rate (how fast MI develops)
-        ischemiaRampTau: 10.0,     // seconds to reach target ischemia
 
         // Rhythm thresholds
         vtFromIschemiaThresh: 0.4,  // ischemiaFactor below which VT risk appears
@@ -93,27 +98,24 @@ export function defaultHeartParams() {
  * @param {number} dt - timestep, s
  * @param {number} lungVolume - current lung volume
  * @param {string} phase - respiratory phase label
- * @param {number} estBpm - estimated breathing rate
+ * @param {number} estBpm - estimated breathing rate (for stress index)
  * @param {number} fPreI - pre-I/I firing rate (0-1)
  * @param {number} fPostI - post-I firing rate (0-1)
  * @param {number} sympatheticTone - from autonomic module (0-1)
  * @param {number} vagalModulation - from autonomic module (adjustment to d_vagal)
  * @param {number} pao2 - arterial PO2, mmHg (for direct asystole check)
+ * @param {number} map - mean arterial pressure, mmHg (for afterload)
+ * @param {number} ischemiaFactor - from hemodynamics (0-1)
  * @param {object} p - heart params
  */
 export function stepHeart(state, dt, lungVolume, phase, estBpm, fPreI, fPostI,
-                          sympatheticTone, vagalModulation, pao2, p) {
+                          sympatheticTone, vagalModulation, pao2, map, ischemiaFactor, p) {
 
     // ── Rhythm state machine ──────────────────────────
-    updateRhythm(state, dt, pao2, sympatheticTone, p);
-
-    // ── Ischemia ramping ──────────────────────────────
-    const ischAlpha = 1 - Math.exp(-dt / p.ischemiaRampTau);
-    state.ischemiaFactor += (state._ischemiaTarget - state.ischemiaFactor) * ischAlpha;
+    updateRhythm(state, dt, pao2, sympatheticTone, ischemiaFactor, p);
 
     // ── Heart rate computation ────────────────────────
     if (state.cardiacRhythm === 'asystole') {
-        // Dead — no electrical activity
         state.currentHr = 0;
         state.cvmnActivity = 0;
         state.strokeVolume = 0;
@@ -124,12 +126,11 @@ export function stepHeart(state, dt, lungVolume, phase, estBpm, fPreI, fPostI,
     }
 
     if (state.cardiacRhythm === 'vf') {
-        // Ventricular fibrillation — chaotic, no effective output
+        // Ventricular fibrillation — chaotic, no effective contraction
         state.currentHr = 200 + (Math.random() - 0.5) * 100;
-        state.strokeVolume = p.baseSV * 0.1 * state.ischemiaFactor;
+        state.strokeVolume = p.svMax * 0.05 * ischemiaFactor;
         state.cardiacOutput = state.currentHr * state.strokeVolume / 1000;
 
-        // No organized beats in VF — produce chaotic "beats" for ECG
         state.beatAccumulator += dt;
         if (state.beatAccumulator > 0.1 + Math.random() * 0.15) {
             state.beatAccumulator = 0;
@@ -140,12 +141,17 @@ export function stepHeart(state, dt, lungVolume, phase, estBpm, fPreI, fPostI,
     }
 
     if (state.cardiacRhythm === 'vt') {
-        // Ventricular tachycardia — fast, regular, poor output
+        // Ventricular tachycardia — fast, bypasses normal conduction
         state.currentHr = 180 + (Math.random() - 0.5) * 10;
-        state.strokeVolume = p.baseSV * 0.3 * state.ischemiaFactor;
+
+        // Frank-Starling still applies: very short filling time at HR 180
+        // Plus 0.5 efficiency factor for abnormal conduction + no atrial kick
+        const vtFilling = Math.max(0.05, 60.0 / state.currentHr - p.systoleDuration);
+        const vtPreload = 1.0 - Math.exp(-vtFilling / p.preloadRef);
+        state.contractility = (1.0 + p.inotropicGain * sympatheticTone) * ischemiaFactor;
+        state.strokeVolume = Math.max(0, state.contractility * p.svMax * vtPreload * 0.5);
         state.cardiacOutput = state.currentHr * state.strokeVolume / 1000;
 
-        // Regular fast beats
         const rrVT = 60.0 / state.currentHr;
         state.beatAccumulator += dt;
         if (state.beatAccumulator >= rrVT) {
@@ -159,7 +165,6 @@ export function stepHeart(state, dt, lungVolume, phase, estBpm, fPreI, fPostI,
     // ── Normal sinus rhythm ───────────────────────────
 
     // CVMN dynamics: receives CPG input + autonomic modulation
-    // vagalModulation adjusts the tonic drive from baroreflex / hypoxic surge
     const effectiveVagalDrive = Math.max(0, p.d_vagal + vagalModulation);
     const cvmnTarget = Math.max(0, Math.min(1,
         effectiveVagalDrive + p.g_postI_cvmn * fPostI - p.g_preI_cvmn * fPreI
@@ -173,10 +178,25 @@ export function stepHeart(state, dt, lungVolume, phase, estBpm, fPreI, fPostI,
     const noise = p.noiseAmp * (Math.random() - 0.5);
     state.currentHr = Math.max(0, p.intrinsicHr - vagalEffect + sympatheticEffect + noise);
 
-    // ── Stroke volume + cardiac output ────────────────
-    state.strokeVolume = p.baseSV
-        * (1 + p.sympatheticSvGain * sympatheticTone)
-        * state.ischemiaFactor;
+    // ── Frank-Starling stroke volume ────────────────
+    // Filling time = diastolic interval (total cycle minus systole)
+    const fillingTime = Math.max(0.05, 60.0 / Math.max(1, state.currentHr) - p.systoleDuration);
+
+    // Preload: saturating function of filling time (Starling curve)
+    const preloadFilling = 1.0 - Math.exp(-fillingTime / p.preloadRef);
+
+    // Contractility: sympathetic inotropic effect × myocardial health
+    state.contractility = (1.0 + p.inotropicGain * sympatheticTone) * ischemiaFactor;
+
+    // Afterload: higher MAP → harder to eject → lower SV
+    const afterloadPenalty = Math.max(0.2,
+        1.0 - p.afterloadGain * Math.max(0, map - p.afterloadRef) / 100.0);
+
+    // SV = contractility × SVmax × starling(filling) × afterload
+    state.strokeVolume = Math.max(0,
+        state.contractility * p.svMax * preloadFilling * afterloadPenalty);
+
+    // Cardiac output
     state.cardiacOutput = state.currentHr * state.strokeVolume / 1000;
 
     // ── Track HR range within breath cycle for RSA measurement ──
@@ -217,7 +237,7 @@ export function stepHeart(state, dt, lungVolume, phase, estBpm, fPreI, fPostI,
  *   vf → asystole:     after asystoleDelay seconds
  *   any → asystole:    PaO2 < asystolePao2 (direct myocardial failure)
  */
-function updateRhythm(state, dt, pao2, sympatheticTone, p) {
+function updateRhythm(state, dt, pao2, sympatheticTone, ischemiaFactor, p) {
     // Direct asystole from severe hypoxia (myocardial energy failure)
     if (pao2 < p.asystolePao2 && state.cardiacRhythm !== 'asystole') {
         state.cardiacRhythm = 'asystole';
@@ -227,28 +247,24 @@ function updateRhythm(state, dt, pao2, sympatheticTone, p) {
 
     switch (state.cardiacRhythm) {
         case 'normal':
-            // VT trigger: significant ischemia + high sympathetic tone
-            if (state.ischemiaFactor < p.vtFromIschemiaThresh && sympatheticTone > 0.6) {
+            if (ischemiaFactor < p.vtFromIschemiaThresh && sympatheticTone > 0.6) {
                 state.cardiacRhythm = 'vt';
                 state.rhythmTimer = 0;
             }
             break;
 
         case 'vt':
-            // VT → VF after delay
             if (state.rhythmTimer > p.vfDelay) {
                 state.cardiacRhythm = 'vf';
                 state.rhythmTimer = 0;
             }
-            // Recovery possible if ischemia resolves
-            if (state.ischemiaFactor > 0.7) {
+            if (ischemiaFactor > 0.7) {
                 state.cardiacRhythm = 'normal';
                 state.rhythmTimer = 0;
             }
             break;
 
         case 'vf':
-            // VF → asystole after delay
             if (state.rhythmTimer > p.asystoleDelay) {
                 state.cardiacRhythm = 'asystole';
                 state.rhythmTimer = 0;
@@ -256,25 +272,15 @@ function updateRhythm(state, dt, pao2, sympatheticTone, p) {
             break;
 
         case 'asystole':
-            // Terminal — no recovery without external intervention
             break;
     }
 }
 
 /**
- * Trigger a myocardial infarction.
- * Sets ischemia target to a low value; actual factor ramps down smoothly.
- */
-export function triggerHeartAttack(state, severity = 0.3) {
-    state._ischemiaTarget = severity;
-}
-
-/**
- * Attempt resuscitation — restore ischemia and reset rhythm.
- * Only works if called before prolonged asystole.
+ * Attempt resuscitation — reset rhythm to normal sinus.
+ * Coronary occlusion is cleared separately on hemodynamics state.
  */
 export function resuscitateHeart(state) {
-    state._ischemiaTarget = 1.0;
     if (state.cardiacRhythm !== 'normal') {
         state.cardiacRhythm = 'normal';
         state.rhythmTimer = 0;
