@@ -18,23 +18,45 @@ import { MicCapture } from './audio/mic.js';
 const canvas = document.getElementById('canvas');
 const renderer = new OrbRenderer(canvas);
 const debug = new DebugPanel();
-const dashboard = new Dashboard();
 const sim = new Simulation(4.0);
+const dashboard = new Dashboard(sim);
 
 // Status elements
 const statusEl = document.getElementById('status');
 const dotEl = document.getElementById('connection-dot');
 const textEl = document.getElementById('status-text');
 
-// View toggle: 'v' key
+// View toggle helper
+function setView(showDashboard) {
+    if (dashboard.visible !== showDashboard) dashboard.toggle();
+    canvas.style.display = dashboard.visible ? 'none' : 'block';
+    statusEl.style.display = dashboard.visible ? 'none' : '';
+    window.location.hash = dashboard.visible ? 'panel' : '';
+}
+
+// 'v' key toggles view
 window.addEventListener('keydown', (e) => {
     if (e.key === 'v' && !e.ctrlKey && !e.metaKey && !e.altKey) {
         if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
-        dashboard.toggle();
-        canvas.style.display = dashboard.visible ? 'none' : 'block';
-        statusEl.style.display = dashboard.visible ? 'none' : '';
+        setView(!dashboard.visible);
     }
 });
+
+// #panel hash → open dashboard on load
+if (window.location.hash === '#panel') {
+    setView(true);
+}
+
+// Respond to hash changes (e.g. back/forward)
+window.addEventListener('hashchange', () => {
+    setView(window.location.hash === '#panel');
+});
+
+// Hint — fade after 5s or first keypress
+const hintEl = document.getElementById('hint');
+const dismissHint = () => hintEl.classList.add('fade');
+setTimeout(dismissHint, 5000);
+window.addEventListener('keydown', dismissHint, { once: true });
 
 // Mic setup — deferred to first user gesture (browser autoplay policy)
 let mic = null;

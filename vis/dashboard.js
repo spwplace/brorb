@@ -73,7 +73,8 @@ function ecgWave(phase) {
 // ── Dashboard class ──────────────────────────────────────────────────
 
 export class Dashboard {
-    constructor() {
+    constructor(sim = null) {
+        this.sim = sim;
         this.visible = false;
 
         // Ring buffers for strip chart (600 = 10s at 60fps)
@@ -121,8 +122,8 @@ export class Dashboard {
             }
             .brorb-dash.active { display: grid; }
             .brorb-dash {
-                grid-template-columns: 200px 1fr 1fr;
-                grid-template-rows: 1fr 1fr 160px;
+                grid-template-columns: 210px 1fr 1fr;
+                grid-template-rows: 1fr 150px 1fr 160px;
                 gap: 6px;
                 padding: 8px;
             }
@@ -153,12 +154,96 @@ export class Dashboard {
                 width: 100%;
                 min-height: 0;
             }
-            .brorb-panel-orb   { grid-column: 1; grid-row: 1; }
-            .brorb-panel-cpg   { grid-column: 2 / 4; grid-row: 1; }
+            .brorb-panel-orb    { grid-column: 1; grid-row: 1; }
+            .brorb-panel-cpg    { grid-column: 2 / 4; grid-row: 1; }
             .brorb-panel-vitals { grid-column: 1; grid-row: 2; }
-            .brorb-panel-lungs  { grid-column: 2; grid-row: 2; }
-            .brorb-panel-heart  { grid-column: 3; grid-row: 2; }
-            .brorb-panel-strip  { grid-column: 1 / 4; grid-row: 3; }
+            .brorb-panel-lungs  { grid-column: 2; grid-row: 2 / 4; }
+            .brorb-panel-heart  { grid-column: 3; grid-row: 2 / 4; }
+            .brorb-panel-ctrl   { grid-column: 1; grid-row: 3; }
+            .brorb-panel-strip  { grid-column: 1 / 4; grid-row: 4; }
+
+            /* ── Controls ─────────────────────────── */
+            .brorb-ctrls {
+                padding: 6px 8px;
+                flex: 1;
+                display: flex;
+                flex-direction: column;
+                justify-content: flex-start;
+                gap: 2px;
+            }
+            .brorb-ctrl {
+                margin-bottom: 6px;
+            }
+            .brorb-ctrl-row {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                margin-bottom: 2px;
+            }
+            .brorb-ctrl-label {
+                font: 9px "SF Mono", Menlo, Consolas, monospace;
+                color: ${C.label};
+            }
+            .brorb-ctrl-val {
+                font: 10px "SF Mono", Menlo, Consolas, monospace;
+                color: ${C.text};
+                min-width: 36px;
+                text-align: right;
+            }
+            .brorb-ctrls input[type=range] {
+                -webkit-appearance: none;
+                appearance: none;
+                width: 100%;
+                height: 4px;
+                background: rgba(60, 80, 120, 0.3);
+                border-radius: 2px;
+                outline: none;
+                margin: 2px 0;
+            }
+            .brorb-ctrls input[type=range]::-webkit-slider-thumb {
+                -webkit-appearance: none;
+                appearance: none;
+                width: 12px;
+                height: 12px;
+                border-radius: 50%;
+                background: ${C.accent};
+                border: 1px solid rgba(0,0,0,0.3);
+                box-shadow: 0 0 6px rgba(232, 160, 64, 0.4);
+                cursor: pointer;
+            }
+            .brorb-ctrls input[type=range]::-moz-range-thumb {
+                width: 12px;
+                height: 12px;
+                border-radius: 50%;
+                background: ${C.accent};
+                border: 1px solid rgba(0,0,0,0.3);
+                box-shadow: 0 0 6px rgba(232, 160, 64, 0.4);
+                cursor: pointer;
+            }
+            .brorb-ctrl-btn {
+                font: 9px "SF Mono", Menlo, Consolas, monospace;
+                color: ${C.text};
+                background: rgba(60, 80, 120, 0.2);
+                border: 1px solid rgba(80, 100, 140, 0.3);
+                border-radius: 3px;
+                padding: 4px 10px;
+                cursor: pointer;
+                letter-spacing: 0.5px;
+                transition: background 0.15s, box-shadow 0.15s;
+                margin-right: 4px;
+            }
+            .brorb-ctrl-btn:hover {
+                background: rgba(80, 110, 160, 0.3);
+                box-shadow: 0 0 8px rgba(80, 120, 180, 0.2);
+            }
+            .brorb-ctrl-btn:active {
+                background: rgba(232, 160, 64, 0.25);
+            }
+            .brorb-ctrl-btns {
+                display: flex;
+                gap: 4px;
+                margin-top: 4px;
+            }
         `;
         document.head.appendChild(style);
 
@@ -167,7 +252,7 @@ export class Dashboard {
         this._container.className = 'brorb-dash';
         document.body.appendChild(this._container);
 
-        // Create panels
+        // Create canvas panels
         const defs = [
             ['orb',    'Orb'],
             ['cpg',    'Brainstem CPG Circuit'],
@@ -193,6 +278,9 @@ export class Dashboard {
             this._panels[id] = { el: panel, canvas: cvs, ctx: cvs.getContext('2d'), w: 0, h: 0 };
         }
 
+        // Create controls panel (DOM elements, not canvas)
+        this._buildControls();
+
         this._resize();
     }
 
@@ -213,6 +301,117 @@ export class Dashboard {
         this.visible = !this.visible;
         this._container.classList.toggle('active', this.visible);
         if (this.visible) this._resize();
+    }
+
+    // ── Controls panel ───────────────────────────────────────────────
+
+    _buildControls() {
+        const panel = document.createElement('div');
+        panel.className = 'brorb-panel brorb-panel-ctrl';
+
+        const hdr = document.createElement('div');
+        hdr.className = 'brorb-panel-hdr';
+        hdr.textContent = 'Controls';
+        panel.appendChild(hdr);
+
+        const wrap = document.createElement('div');
+        wrap.className = 'brorb-ctrls';
+        panel.appendChild(wrap);
+
+        this._ctrlVals = {};
+
+        const sliders = [
+            { id: 'bpm',    label: 'Target BPM',  min: 1.5, max: 15,  step: 0.5,  val: 4.0,  fmt: v => v.toFixed(1) },
+            { id: 'drive',  label: 'Neural Drive', min: -1.5, max: 1.5, step: 0.1, val: 0,    fmt: v => (v > 0 ? '+' : '') + v.toFixed(1) },
+            { id: 'metab',  label: 'Metabolic Rate', min: 0, max: 0.1, step: 0.005, val: 0.03, fmt: v => v.toFixed(3) },
+            { id: 'couple', label: 'Mic Coupling', min: 0, max: 2,    step: 0.1,  val: 0.8,  fmt: v => v.toFixed(1) },
+        ];
+
+        for (const s of sliders) {
+            const ctrl = document.createElement('div');
+            ctrl.className = 'brorb-ctrl';
+
+            const row = document.createElement('div');
+            row.className = 'brorb-ctrl-row';
+
+            const lbl = document.createElement('span');
+            lbl.className = 'brorb-ctrl-label';
+            lbl.textContent = s.label;
+            row.appendChild(lbl);
+
+            const valSpan = document.createElement('span');
+            valSpan.className = 'brorb-ctrl-val';
+            valSpan.textContent = s.fmt(s.val);
+            row.appendChild(valSpan);
+
+            ctrl.appendChild(row);
+
+            const input = document.createElement('input');
+            input.type = 'range';
+            input.min = s.min;
+            input.max = s.max;
+            input.step = s.step;
+            input.value = s.val;
+            ctrl.appendChild(input);
+
+            this._ctrlVals[s.id] = { input, valSpan, fmt: s.fmt };
+
+            input.addEventListener('input', () => {
+                const v = parseFloat(input.value);
+                valSpan.textContent = s.fmt(v);
+                this._applyControl(s.id, v);
+            });
+
+            wrap.appendChild(ctrl);
+        }
+
+        // Buttons
+        const btns = document.createElement('div');
+        btns.className = 'brorb-ctrl-btns';
+
+        const breathBtn = document.createElement('button');
+        breathBtn.className = 'brorb-ctrl-btn';
+        breathBtn.textContent = 'Trigger Breath';
+        breathBtn.addEventListener('click', () => {
+            if (this.sim) {
+                this.sim.applyBreathEvent({ kind: 'exhale_start', strength: 3.0 });
+            }
+        });
+        btns.appendChild(breathBtn);
+
+        const resetBtn = document.createElement('button');
+        resetBtn.className = 'brorb-ctrl-btn';
+        resetBtn.textContent = 'Reset';
+        resetBtn.addEventListener('click', () => {
+            for (const s of sliders) {
+                const c = this._ctrlVals[s.id];
+                c.input.value = s.val;
+                c.valSpan.textContent = s.fmt(s.val);
+                this._applyControl(s.id, s.val);
+            }
+        });
+        btns.appendChild(resetBtn);
+
+        wrap.appendChild(btns);
+        this._container.appendChild(panel);
+    }
+
+    _applyControl(id, value) {
+        if (!this.sim) return;
+        switch (id) {
+            case 'bpm':
+                this.sim.setTargetBpm(value);
+                break;
+            case 'drive':
+                this.sim.manualDrive = value;
+                break;
+            case 'metab':
+                this.sim.chemoParams.co2Production = value;
+                break;
+            case 'couple':
+                this.sim.entrainStrength = value;
+                break;
+        }
     }
 
     // ── Data ─────────────────────────────────────────────────────────
@@ -600,7 +799,7 @@ export class Dashboard {
 
         const x = 10;
         let y = 12;
-        const lineH = 18;
+        const lineH = 15;
 
         const mono = '11px "SF Mono", Menlo, Consolas, monospace';
         const monoSm = '9px "SF Mono", Menlo, Consolas, monospace';
@@ -633,83 +832,41 @@ export class Dashboard {
         ctx.fillStyle = state.phase === 'inspiration' ? C.accent : C.teal;
         ctx.font = monoSm;
         ctx.fillText((state.phase ?? '').toUpperCase(), x + 50, y);
-        y += lineH + 6;
+        y += lineH + 2;
 
-        // ── CO2 gauge ────────────────
-        ctx.font = mono;
+        // ── CO2 bar ────────────────
+        ctx.font = monoSm;
         ctx.fillStyle = C.label;
         ctx.fillText('CO\u2082', x, y);
         ctx.fillStyle = C.text;
+        ctx.font = mono;
         ctx.fillText(`${(state.pco2 ?? 1).toFixed(2)}`, x + 50, y);
-        y += lineH;
+        y += 4;
 
-        // Arc gauge
-        const gcx = w * 0.5, gcy = y + 42;
-        const gr = 35;
-        const startAngle = Math.PI * 0.75;
-        const endAngle = Math.PI * 0.25;
-        const totalAngle = Math.PI * 1.5;
-
-        // Background arc
-        ctx.beginPath();
-        ctx.arc(gcx, gcy, gr, startAngle, startAngle + totalAngle);
-        ctx.strokeStyle = 'rgba(60, 70, 100, 0.3)';
-        ctx.lineWidth = 6;
-        ctx.lineCap = 'round';
-        ctx.stroke();
-
-        // Colored arc segments
         const co2 = Math.max(0, Math.min(2, state.pco2 ?? 1));
         const co2Frac = co2 / 2.0;
-        const segments = [
-            { frac: 0.375, color: 'rgba(50, 180, 80, 0.6)' },
-            { frac: 0.625, color: 'rgba(200, 180, 50, 0.6)' },
-            { frac: 1.0,   color: 'rgba(200, 60, 60, 0.6)' },
-        ];
-        let prevFrac = 0;
-        for (const seg of segments) {
-            if (co2Frac <= prevFrac) break;
-            const from = startAngle + prevFrac * totalAngle;
-            const to = startAngle + Math.min(co2Frac, seg.frac) * totalAngle;
-            ctx.beginPath();
-            ctx.arc(gcx, gcy, gr, from, to);
-            ctx.strokeStyle = seg.color;
-            ctx.lineWidth = 6;
-            ctx.stroke();
-            prevFrac = seg.frac;
-        }
+        const co2BarX = x + 45, co2BarW = w - co2BarX - 10, co2BarH = 8;
 
-        // Needle
-        const needleAngle = startAngle + co2Frac * totalAngle;
-        const nx = gcx + Math.cos(needleAngle) * (gr - 10);
-        const ny = gcy + Math.sin(needleAngle) * (gr - 10);
-        const ntx = gcx + Math.cos(needleAngle) * (gr + 4);
-        const nty = gcy + Math.sin(needleAngle) * (gr + 4);
-        ctx.beginPath();
-        ctx.moveTo(nx, ny);
-        ctx.lineTo(ntx, nty);
-        ctx.strokeStyle = '#ffffff';
-        ctx.lineWidth = 2;
-        ctx.lineCap = 'round';
-        ctx.stroke();
+        // Background
+        ctx.fillStyle = 'rgba(255,255,255,0.06)';
+        ctx.fillRect(co2BarX, y, co2BarW, co2BarH);
 
-        // Center dot
-        ctx.beginPath();
-        ctx.arc(gcx, gcy, 3, 0, Math.PI * 2);
-        ctx.fillStyle = '#ffffff';
-        ctx.fill();
+        // Colored fill: green → yellow → red
+        const co2r = co2Frac < 0.5 ? Math.round(co2Frac * 2 * 200) : 200;
+        const co2g = co2Frac < 0.5 ? 180 : Math.round((1 - (co2Frac - 0.5) * 2) * 180);
+        ctx.fillStyle = `rgb(${co2r}, ${co2g}, 40)`;
+        ctx.fillRect(co2BarX, y, co2Frac * co2BarW, co2BarH);
 
-        // Threshold tick
-        const threshFrac = 0.75 / 2.0;
-        const tAngle = startAngle + threshFrac * totalAngle;
-        ctx.beginPath();
-        ctx.moveTo(gcx + Math.cos(tAngle) * (gr + 6), gcy + Math.sin(tAngle) * (gr + 6));
-        ctx.lineTo(gcx + Math.cos(tAngle) * (gr + 12), gcy + Math.sin(tAngle) * (gr + 12));
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+        // Threshold tick at 0.75 (apneic threshold)
+        const threshX = co2BarX + (0.75 / 2.0) * co2BarW;
+        ctx.strokeStyle = 'rgba(255,255,255,0.3)';
         ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(threshX, y - 2);
+        ctx.lineTo(threshX, y + co2BarH + 2);
         ctx.stroke();
 
-        y = gcy + gr + 20;
+        y += co2BarH + lineH * 0.6;
 
         // ── Stress bar ───────────────
         ctx.font = monoSm;

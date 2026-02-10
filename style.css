@@ -53,3 +53,25 @@ html, body {
 #connection-dot.connected {
     background: #44aa44;
 }
+
+#hint {
+    position: fixed;
+    top: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    color: rgba(200, 190, 170, 0.7);
+    font: 11px "SF Mono", Menlo, Consolas, monospace;
+    letter-spacing: 0.5px;
+    pointer-events: none;
+    transition: opacity 1.5s ease;
+    z-index: 100;
+}
+#hint kbd {
+    display: inline-block;
+    padding: 1px 5px;
+    border: 1px solid rgba(200, 190, 170, 0.25);
+    border-radius: 3px;
+    font-family: inherit;
+    font-size: inherit;
+}
+#hint.fade { opacity: 0; }

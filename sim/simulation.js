@@ -37,6 +37,9 @@ export class Simulation {
         this.t = 0;
         this.stepCount = 0;
 
+        // Manual drive (hyper/hypoventilation from controls)
+        this.manualDrive = 0;
+
         // Entrainment
         this.entrainPulse = 0;
         this.entrainDecay = 0.995;
@@ -84,6 +87,11 @@ export class Simulation {
             for (const k in d) {
                 ext[k] = (ext[k] ?? 0) + d[k];
             }
+        }
+
+        // Add manual drive (hyper/hypoventilation)
+        if (this.manualDrive !== 0) {
+            ext.drive_1 = (ext.drive_1 ?? 0) + this.manualDrive;
         }
 
         // Add entrainment pulse to pre-I/I drive
