@@ -18,7 +18,7 @@ import { MicCapture } from './audio/mic.js';
 const canvas = document.getElementById('canvas');
 const renderer = new OrbRenderer(canvas);
 const debug = new DebugPanel();
-const sim = new Simulation(4.0);
+const sim = new Simulation(6.0);
 const dashboard = new Dashboard(sim);
 
 // Status elements

@@ -4,9 +4,13 @@
  * Runs the CPG + lung + chemo + heart models, driven by
  * requestAnimationFrame from app.js. Returns state snapshots
  * for the renderer.
+ *
+ * Rate control: breathing rate is modulated by smoothly interpolating
+ * tonic drives (d1, d3, d5) toward target values computed by
+ * driveProfile(). Biophysical timescales are FIXED.
  */
 
-import { CPGState, defaultParams, rk4Step, sigmoid } from './cpg.js';
+import { CPGState, defaultParams, driveProfile, BASE_DRIVES, rk4Step, sigmoid } from './cpg.js';
 import { LungState, defaultLungParams, lungRk4Step, heringBreuerDrives } from './lungs.js';
 import { ChemoState, defaultChemoParams, stepChemo, chemoCpgDrives } from './chemo.js';
 import { HeartState, defaultHeartParams, stepHeart } from './heart.js';
@@ -20,11 +24,11 @@ function determinePhase(cpgY, cpgP) {
 }
 
 export class Simulation {
-    constructor(targetBpm = 4.0) {
+    constructor(targetBpm = 6.0) {
         this.dt = 0.001;
 
-        // Models
-        this.cpgParams = defaultParams(targetBpm);
+        // Models — params created once, drives interpolated smoothly
+        this.cpgParams = defaultParams();
         this.lungParams = defaultLungParams();
         this.cpgState = new CPGState();
         this.lungState = new LungState();
@@ -37,10 +41,15 @@ export class Simulation {
         this.t = 0;
         this.stepCount = 0;
 
+        // Drive interpolation
+        this._targetBpm = targetBpm;
+        this._targetDrives = driveProfile(targetBpm);
+        this._driveInterpolTau = 2.0;  // smooth transition over ~2s
+
         // Manual drive (hyper/hypoventilation from controls)
         this.manualDrive = 0;
 
-        // Entrainment
+        // Entrainment (routes to d3 = post-I, reinforcing expiratory transition)
         this.entrainPulse = 0;
         this.entrainDecay = 0.995;
         this.entrainStrength = 0.8;
@@ -78,7 +87,13 @@ export class Simulation {
     }
 
     _step() {
-        // Gather external drives
+        // --- Drive interpolation (smooth transition toward target) ---
+        const alpha = 1 - Math.exp(-this.dt / this._driveInterpolTau);
+        this.cpgParams.d1 += (BASE_DRIVES.d1 + this._targetDrives.d1_offset - this.cpgParams.d1) * alpha;
+        this.cpgParams.d3 += (BASE_DRIVES.d3 + this._targetDrives.d3_offset - this.cpgParams.d3) * alpha;
+        this.cpgParams.d5 += (BASE_DRIVES.d5 + this._targetDrives.d5_offset - this.cpgParams.d5) * alpha;
+
+        // Gather external drives from feedback loops
         const hbDrives = heringBreuerDrives(this.lungState.y, this.lungParams);
         const chemDrives = chemoCpgDrives(this.chemoState);
 
@@ -94,9 +109,9 @@ export class Simulation {
             ext.drive_1 = (ext.drive_1 ?? 0) + this.manualDrive;
         }
 
-        // Add entrainment pulse to pre-I/I drive
+        // Entrainment pulse → post-I drive (d3) to reinforce expiratory transition
         if (this.entrainPulse > 0.01) {
-            ext.drive_1 = (ext.drive_1 ?? 0) + this.entrainPulse * this.entrainStrength;
+            ext.drive_3 = (ext.drive_3 ?? 0) + this.entrainPulse * this.entrainStrength;
             this.entrainPulse *= this.entrainDecay;
         }
 
@@ -135,9 +150,10 @@ export class Simulation {
         const ventilation = this._smoothVolume * (this._estBpm / 4.0);
         stepChemo(this.chemoState, this.dt, ventilation, this.chemoParams);
 
-        // Step heart model
+        // Step heart model — CVMN receives pre-I/I (inhibitory) and post-I (excitatory)
         const phase = determinePhase(this.cpgState.y, this.cpgParams);
-        stepHeart(this.heartState, this.dt, v, phase, this._estBpm, this.heartParams);
+        const fPostI = sigmoid(this.cpgState.y[2], this.cpgParams.k_f, this.cpgParams.Vh_f);
+        stepHeart(this.heartState, this.dt, v, phase, this._estBpm, f1, fPostI, this.heartParams);
 
         this.t += this.dt;
         this.stepCount++;
@@ -173,8 +189,9 @@ export class Simulation {
             ramp_I: this.lungState.y[0],
             breath_detected: this.breathDetected,
             t: this.t,
-            pco2: this.chemoState.pco2,
+            pco2: this.chemoState.paco2,
             chemo_drive: this.chemoState.chemoDrive,
+            vagal_tone: this.heartState.cvmnActivity,
             heart_rate: this.heartState.currentHr,
             rsa_amplitude: this.heartState.rsaAmplitude,
             heartbeat: this.heartState.heartbeat,
@@ -190,6 +207,7 @@ export class Simulation {
 
     applyBreathEvent(event) {
         if (event.kind === 'exhale_start') {
+            // Boost post-I drive to reinforce expiratory phase transition
             this.entrainPulse = Math.max(this.entrainPulse, event.strength * 0.5);
             this.breathDetected = true;
             this.breathDetectDecay = Math.floor(0.5 / this.dt);  // 500ms
@@ -197,6 +215,8 @@ export class Simulation {
     }
 
     setTargetBpm(bpm) {
-        this.cpgParams = defaultParams(bpm);
+        // Smoothly interpolate drives — does NOT recreate params
+        this._targetBpm = bpm;
+        this._targetDrives = driveProfile(bpm);
     }
 }

@@ -42,7 +42,7 @@ export class DebugPanel {
 
         const i = this.writeIdx % this.bufLen;
         this.lungBuf[i] = state.lung_volume || 0;
-        this.co2Buf[i] = state.pco2 || 1;
+        this.co2Buf[i] = state.pco2 || 40;
         this.hrBuf[i] = state.heart_rate || 70;
         this.writeIdx++;
 
@@ -127,15 +127,16 @@ export class DebugPanel {
 
         y += traceH + 8;
 
-        // 3. CO2 indicator
+        // 3. CO2 indicator (mmHg)
         ctx.fillStyle = '#8899aa';
         ctx.font = '10px monospace';
-        const pco2 = state.pco2 || 1.0;
-        ctx.fillText(`CO\u2082: ${pco2.toFixed(2)}`, 8, y + 2);
+        const pco2 = state.pco2 || 40.0;
+        ctx.fillText(`CO\u2082: ${pco2.toFixed(1)} mmHg`, 8, y + 2);
         y += 8;
 
         const co2BarH = 14;
-        const co2Max = 2.0;
+        const co2Min = 20.0;
+        const co2Max = 60.0;
 
         const co2Grad = ctx.createLinearGradient(traceX, 0, traceX + traceW, 0);
         co2Grad.addColorStop(0, '#206830');
@@ -145,12 +146,13 @@ export class DebugPanel {
         ctx.fillStyle = co2Grad;
         ctx.fillRect(traceX, y, traceW, co2BarH);
 
-        const co2Frac = Math.min(1, Math.max(0, pco2 / co2Max));
+        const co2Frac = Math.min(1, Math.max(0, (pco2 - co2Min) / (co2Max - co2Min)));
         const co2X = traceX + co2Frac * traceW;
         ctx.fillStyle = '#ffffff';
         ctx.fillRect(co2X - 1, y - 2, 3, co2BarH + 4);
 
-        const threshFrac = 0.75 / co2Max;
+        // Apneic threshold at 35 mmHg
+        const threshFrac = (35.0 - co2Min) / (co2Max - co2Min);
         const threshX = traceX + threshFrac * traceW;
         ctx.strokeStyle = 'rgba(255,255,255,0.5)';
         ctx.lineWidth = 1;
@@ -205,6 +207,6 @@ export class DebugPanel {
 
         ctx.fillStyle = '#667788';
         ctx.font = '9px monospace';
-        ctx.fillText(`Chemo drive: ${(state.chemo_drive || 0).toFixed(3)}`, 8, y + 2);
+        ctx.fillText(`Chemo: ${(state.chemo_drive || 0).toFixed(3)}  Vagal: ${(state.vagal_tone || 0).toFixed(2)}`, 8, y + 2);
     }
 }

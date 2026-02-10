@@ -321,9 +321,9 @@ export class Dashboard {
         this._ctrlVals = {};
 
         const sliders = [
-            { id: 'bpm',    label: 'Target BPM',  min: 1.5, max: 15,  step: 0.5,  val: 4.0,  fmt: v => v.toFixed(1) },
+            { id: 'bpm',    label: 'Target BPM',  min: 1.5, max: 15,  step: 0.5,  val: 6.0,  fmt: v => v.toFixed(1) },
             { id: 'drive',  label: 'Neural Drive', min: -1.5, max: 1.5, step: 0.1, val: 0,    fmt: v => (v > 0 ? '+' : '') + v.toFixed(1) },
-            { id: 'metab',  label: 'Metabolic Rate', min: 0, max: 0.1, step: 0.005, val: 0.03, fmt: v => v.toFixed(3) },
+            { id: 'metab',  label: 'Metabolic Rate', min: 0.1, max: 2.0, step: 0.05, val: 0.5, fmt: v => v.toFixed(2) },
             { id: 'couple', label: 'Mic Coupling', min: 0, max: 2,    step: 0.1,  val: 0.8,  fmt: v => v.toFixed(1) },
         ];
 
@@ -422,7 +422,7 @@ export class Dashboard {
         this.bufs.fPreI[i]   = state.f_preI ?? 0;
         this.bufs.fPostI[i]  = state.f_postI ?? 0;
         this.bufs.fAugE[i]   = state.f_augE ?? 0;
-        this.bufs.pco2[i]    = state.pco2 ?? 1;
+        this.bufs.pco2[i]    = state.pco2 ?? 40;
         this.bufs.hr[i]      = state.heart_rate ?? 70;
         this.writeIdx++;
 
@@ -834,17 +834,18 @@ export class Dashboard {
         ctx.fillText((state.phase ?? '').toUpperCase(), x + 50, y);
         y += lineH + 2;
 
-        // ── CO2 bar ────────────────
+        // ── CO2 bar (mmHg) ────────────────
         ctx.font = monoSm;
         ctx.fillStyle = C.label;
         ctx.fillText('CO\u2082', x, y);
         ctx.fillStyle = C.text;
         ctx.font = mono;
-        ctx.fillText(`${(state.pco2 ?? 1).toFixed(2)}`, x + 50, y);
+        ctx.fillText(`${(state.pco2 ?? 40).toFixed(0)}`, x + 50, y);
         y += 4;
 
-        const co2 = Math.max(0, Math.min(2, state.pco2 ?? 1));
-        const co2Frac = co2 / 2.0;
+        const co2Min = 20.0, co2Max = 60.0;
+        const co2 = Math.max(co2Min, Math.min(co2Max, state.pco2 ?? 40));
+        const co2Frac = (co2 - co2Min) / (co2Max - co2Min);
         const co2BarX = x + 45, co2BarW = w - co2BarX - 10, co2BarH = 8;
 
         // Background
@@ -857,8 +858,9 @@ export class Dashboard {
         ctx.fillStyle = `rgb(${co2r}, ${co2g}, 40)`;
         ctx.fillRect(co2BarX, y, co2Frac * co2BarW, co2BarH);
 
-        // Threshold tick at 0.75 (apneic threshold)
-        const threshX = co2BarX + (0.75 / 2.0) * co2BarW;
+        // Threshold tick at 35 mmHg (apneic threshold)
+        const threshFrac = (35.0 - co2Min) / (co2Max - co2Min);
+        const threshX = co2BarX + threshFrac * co2BarW;
         ctx.strokeStyle = 'rgba(255,255,255,0.3)';
         ctx.lineWidth = 1;
         ctx.beginPath();
@@ -890,6 +892,13 @@ export class Dashboard {
         ctx.fillText('Chemo', x, y);
         ctx.fillStyle = C.dim;
         ctx.fillText(`${(state.chemo_drive ?? 0).toFixed(3)}`, x + 45, y);
+        y += lineH;
+
+        // Vagal tone
+        ctx.fillStyle = C.label;
+        ctx.fillText('Vagal', x, y);
+        ctx.fillStyle = C.dim;
+        ctx.fillText(`${(state.vagal_tone ?? 0).toFixed(2)}`, x + 45, y);
     }
 
     // ── Strip chart ──────────────────────────────────────────────────
@@ -904,7 +913,7 @@ export class Dashboard {
             { buf: this.bufs.fPreI,   color: '#e8a040', label: 'pre-I', min: 0, max: 1 },
             { buf: this.bufs.fPostI,  color: '#40c8c8', label: 'post-I', min: 0, max: 1 },
             { buf: this.bufs.fAugE,   color: '#4080d0', label: 'aug-E', min: 0, max: 1 },
-            { buf: this.bufs.pco2,    color: '#60b840', label: 'CO\u2082', min: 0.5, max: 1.5 },
+            { buf: this.bufs.pco2,    color: '#60b840', label: 'CO\u2082', min: 30, max: 50 },
             { buf: this.bufs.hr,      color: '#e06070', label: 'HR', min: 55, max: 90 },
         ];
 

@@ -30,25 +30,31 @@ export function sigmoid(V, k = 10.0, Vhalf = 0.0) {
     return 1.0 / (1.0 + Math.exp(-x));
 }
 
-export function defaultParams(targetBpm = 4.0) {
-    const period = 60.0 / targetBpm;
+/**
+ * Default CPG parameters with FIXED biophysical timescales.
+ *
+ * Time constants are intrinsic membrane properties (Rubin et al. 2011,
+ * J Comput Neurosci 30:607-632) — they do NOT change with breathing rate.
+ * Rate modulation works through tonic drives d1–d5 (Molkov et al. 2017).
+ */
+export function defaultParams() {
     return {
-        tau_m: 0.02,
+        tau_m: 0.02,          // membrane time constant, 20ms (fast)
 
-        // Tonic drives
+        // Tonic drives — baseline for ~4 BPM eupnea
         d1: 0.0, d2: -0.3, d3: 0.3, d4: 0.15, d5: -0.5,
 
-        // INaP (pops 1, 5)
+        // INaP inactivation — FIXED biophysical (pops 1, 5)
         g_NaP1: 3.0, g_NaP5: 2.5,
         k_hNaP: -10.0, Vh_hNaP: -0.2,
-        tau_hNaP: period * 0.6,
+        tau_hNaP: 9.0,        // INaP inactivation, ~9s
 
-        // Adaptation (pops 2, 3, 4)
+        // Adaptation — FIXED biophysical (pops 2, 3, 4)
         g_AD2: 4.0, g_AD3: 3.5, g_AD4: 3.0,
         k_mAD: 6.0, Vh_mAD: 0.1,
-        tau_AD2: period * 0.47,
-        tau_AD3: period * 0.73,
-        tau_AD4: period * 0.93,
+        tau_AD2: 7.0,         // early-I adaptation, ~7s
+        tau_AD3: 11.0,        // post-I adaptation, ~11s
+        tau_AD4: 14.0,        // aug-E adaptation, ~14s
 
         // Synaptic weights
         w_21: 1.2,                          // pre-I/I -> early-I (exc)
@@ -59,6 +65,32 @@ export function defaultParams(targetBpm = 4.0) {
 
         // Firing rate sigmoid
         k_f: 8.0, Vh_f: 0.0,
+    };
+}
+
+/**
+ * Baseline tonic drives (for drive interpolation).
+ * Separated from defaultParams so simulation can interpolate toward targets.
+ */
+export const BASE_DRIVES = { d1: 0.0, d2: -0.3, d3: 0.3, d4: 0.15, d5: -0.5 };
+
+/**
+ * Compute drive offsets for a target breathing rate.
+ *
+ * Per Molkov et al. (2017): rate is controlled by adjusting external
+ * excitatory drives, not timescales. Increasing d1 (pre-I/I) strengthens
+ * inspiration; decreasing d3 (post-I) shortens the post-inspiratory
+ * pause; increasing d5 (late-E) recruits active expiration at high rates.
+ *
+ * @param {number} targetBpm - desired breaths per minute
+ * @returns {{ d1_offset: number, d3_offset: number, d5_offset: number }}
+ */
+export function driveProfile(targetBpm) {
+    const ratio = targetBpm / 4.0;
+    return {
+        d1_offset: (ratio - 1.0) * 0.4,
+        d3_offset: (1.0 - ratio) * 0.2,
+        d5_offset: Math.max(0, ratio - 2.0) * 0.3,
     };
 }
 
