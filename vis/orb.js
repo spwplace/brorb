@@ -2,16 +2,10 @@
  * Brorb — Breathing orb visualization.
  *
  * Renders a softly glowing orb on a dark canvas whose size and color
- * are driven by the brainstem CPG simulation via WebSocket.
- *
- * - Radius: driven by lung_volume (smoothly interpolated)
- * - Color: warm gold/amber during inspiration, cool blue during expiration
- * - Surface: organic noise displacement (simplex noise)
- * - Ambient: soft radial glow + drifting particles
+ * are driven by the brainstem CPG simulation.
  */
 
 // ── Simplex noise (2D) ──────────────────────────────────────────────
-// Minimal implementation for organic surface displacement.
 
 const GRAD2 = [
     [1,1],[-1,1],[1,-1],[-1,-1],
@@ -22,7 +16,6 @@ const PERM12 = new Uint8Array(512);
 {
     const p = new Uint8Array(256);
     for (let i = 0; i < 256; i++) p[i] = i;
-    // Fisher-Yates shuffle with fixed seed
     let seed = 42;
     for (let i = 255; i > 0; i--) {
         seed = (seed * 16807 + 0) % 2147483647;
@@ -81,51 +74,6 @@ function noise2D(x, y) {
     return 70 * (n0 + n1 + n2);
 }
 
-// ── WebSocket connection ─────────────────────────────────────────────
-
-class Connection {
-    constructor() {
-        this.ws = null;
-        this.state = null;
-        this.connected = false;
-        this._reconnectDelay = 500;
-        this.connect();
-    }
-
-    connect() {
-        const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-        const url = `${proto}://${location.host}/ws`;
-        this.ws = new WebSocket(url);
-
-        this.ws.onopen = () => {
-            this.connected = true;
-            this._reconnectDelay = 500;
-            document.getElementById('connection-dot').classList.add('connected');
-            document.getElementById('status').classList.add('connected');
-            document.getElementById('status-text').textContent = 'breathing';
-        };
-
-        this.ws.onmessage = (e) => {
-            try {
-                this.state = JSON.parse(e.data);
-            } catch {}
-        };
-
-        this.ws.onclose = () => {
-            this.connected = false;
-            document.getElementById('connection-dot').classList.remove('connected');
-            document.getElementById('status').classList.remove('connected');
-            document.getElementById('status-text').textContent = 'reconnecting';
-            setTimeout(() => this.connect(), this._reconnectDelay);
-            this._reconnectDelay = Math.min(this._reconnectDelay * 1.5, 5000);
-        };
-
-        this.ws.onerror = () => {
-            this.ws.close();
-        };
-    }
-}
-
 // ── Particles ────────────────────────────────────────────────────────
 
 class Particle {
@@ -147,19 +95,16 @@ class Particle {
     }
 
     update(cx, cy, orbR, breathPhase) {
-        // Gentle drift toward/away from orb based on breath phase
         const dx = this.x - cx;
         const dy = this.y - cy;
         const dist = Math.sqrt(dx * dx + dy * dy) || 1;
         const nx = dx / dist;
         const ny = dy / dist;
 
-        // During inspiration, particles drift inward; expiration, outward
         const breathForce = breathPhase === 'inspiration' ? -0.05 : 0.02;
         this.vx += nx * breathForce;
         this.vy += ny * breathForce;
 
-        // Damping
         this.vx *= 0.98;
         this.vy *= 0.98;
 
@@ -171,7 +116,7 @@ class Particle {
 
 // ── Orb renderer ─────────────────────────────────────────────────────
 
-class OrbRenderer {
+export class OrbRenderer {
     constructor(canvas) {
         this.canvas = canvas;
         this.ctx = canvas.getContext('2d');
@@ -182,7 +127,10 @@ class OrbRenderer {
         this.smoothPostI = 0;
         this.smoothAugE = 0;
         this.currentPhase = 'expiration';
-        this.inspireBlend = 0;  // 0 = full expiration color, 1 = full inspiration
+        this.inspireBlend = 0;
+        this.smoothStress = 0;
+        this._heartPulse = 0;
+        this._breathFlash = 0;
 
         // Particles
         this.particles = [];
@@ -212,7 +160,6 @@ class OrbRenderer {
         this.time += dt;
 
         if (state) {
-            // Smooth interpolation toward target values
             const smooth = 0.08;
             this.smoothVolume += (state.lung_volume - this.smoothVolume) * smooth;
             this.smoothPreI += (state.f_preI - this.smoothPreI) * smooth;
@@ -220,13 +167,21 @@ class OrbRenderer {
             this.smoothAugE += (state.f_augE - this.smoothAugE) * smooth;
             this.currentPhase = state.phase;
 
-            // Inspiration blend: ramp toward 1 during inspiration, 0 otherwise
             const targetBlend = state.phase === 'inspiration' ? 1.0 : 0.0;
             this.inspireBlend += (targetBlend - this.inspireBlend) * 0.04;
+
+            if (state.stress_index !== undefined) {
+                this.smoothStress += (state.stress_index - this.smoothStress) * 0.02;
+            }
+
+            if (state.heartbeat) {
+                this._heartPulse = 2.0;
+            }
         }
 
-        // Update particles
-        const orbR = this.baseRadius * (1 + this.smoothVolume * 0.8);
+        this._heartPulse *= 0.90;
+
+        const orbR = this.baseRadius * (1 + this.smoothVolume * 0.8) + this._heartPulse;
         for (let i = this.particles.length - 1; i >= 0; i--) {
             this.particles[i].update(this.cx, this.cy, orbR, this.currentPhase);
             if (this.particles[i].life <= 0) {
@@ -234,7 +189,6 @@ class OrbRenderer {
             }
         }
 
-        // Spawn particles
         while (this.particles.length < this.maxParticles) {
             this.particles.push(new Particle(this.cx, this.cy, orbR));
         }
@@ -245,37 +199,35 @@ class OrbRenderer {
         const w = this.width;
         const h = this.height;
 
-        // Clear with deep blue-black
         ctx.fillStyle = '#060610';
         ctx.fillRect(0, 0, w, h);
 
         const volume = this.smoothVolume;
-        const orbR = this.baseRadius * (1 + volume * 0.8);
+        const orbR = this.baseRadius * (1 + volume * 0.8) + this._heartPulse;
         const cx = this.cx;
         const cy = this.cy;
 
-        // ── Color blending ───────────────────────────────────────
-        // Inspiration: warm gold/amber (#d4a45a → #f0c878)
-        // Expiration: cool blue (#3a6ea5 → #5b8ec9)
+        // Color blending
         const blend = this.inspireBlend;
+        const satMult = 1.0 - this.smoothStress * 0.3;
 
-        const r = Math.round(58 + blend * 154);   // 58 → 212
-        const g = Math.round(110 + blend * 90);    // 110 → 200
-        const b = Math.round(165 - blend * 75);    // 165 → 90
+        const rBase = 58 + blend * 154;
+        const gBase = 110 + blend * 90;
+        const bBase = 165 - blend * 75;
+        const r = Math.round(128 + (rBase - 128) * satMult);
+        const g = Math.round(128 + (gBase - 128) * satMult);
+        const b = Math.round(128 + (bBase - 128) * satMult);
 
-        const coreColor = `rgb(${r}, ${g}, ${b})`;
-
-        // ── Outer glow ───────────────────────────────────────────
+        // Outer glow
         const glowR = orbR * 3.0;
         const glowGrad = ctx.createRadialGradient(cx, cy, orbR * 0.5, cx, cy, glowR);
         glowGrad.addColorStop(0, `rgba(${r}, ${g}, ${b}, 0.15)`);
         glowGrad.addColorStop(0.4, `rgba(${r}, ${g}, ${b}, 0.05)`);
         glowGrad.addColorStop(1, 'rgba(6, 6, 16, 0)');
-
         ctx.fillStyle = glowGrad;
         ctx.fillRect(0, 0, w, h);
 
-        // ── Particles ────────────────────────────────────────────
+        // Particles
         for (const p of this.particles) {
             const a = p.alpha * p.life;
             if (a < 0.01) continue;
@@ -285,10 +237,10 @@ class OrbRenderer {
             ctx.fill();
         }
 
-        // ── Orb body with noise displacement ─────────────────────
+        // Orb body with noise displacement
         const segments = 120;
         const noiseScale = 1.5;
-        const noiseAmp = orbR * 0.04;  // subtle surface perturbation
+        const noiseAmp = orbR * 0.04;
         const timeScale = this.time * 0.3;
 
         ctx.beginPath();
@@ -297,7 +249,6 @@ class OrbRenderer {
             const nx = Math.cos(angle);
             const ny = Math.sin(angle);
 
-            // Simplex noise displacement
             const n = noise2D(
                 nx * noiseScale + timeScale,
                 ny * noiseScale + timeScale * 0.7
@@ -320,24 +271,22 @@ class OrbRenderer {
         bodyGrad.addColorStop(0, `rgba(${Math.min(255, r+60)}, ${Math.min(255, g+40)}, ${Math.min(255, b+20)}, 0.95)`);
         bodyGrad.addColorStop(0.5, `rgba(${r}, ${g}, ${b}, 0.85)`);
         bodyGrad.addColorStop(1, `rgba(${Math.max(0, r-40)}, ${Math.max(0, g-30)}, ${Math.max(0, b-20)}, 0.7)`);
-
         ctx.fillStyle = bodyGrad;
         ctx.fill();
 
-        // ── Inner highlight (specular) ───────────────────────────
+        // Inner highlight (specular)
         const specGrad = ctx.createRadialGradient(
             cx - orbR * 0.25, cy - orbR * 0.25, 0,
             cx - orbR * 0.1, cy - orbR * 0.1, orbR * 0.6
         );
         specGrad.addColorStop(0, `rgba(255, 255, 255, ${0.12 + blend * 0.08})`);
         specGrad.addColorStop(1, 'rgba(255, 255, 255, 0)');
-
         ctx.fillStyle = specGrad;
         ctx.beginPath();
         ctx.arc(cx, cy, orbR, 0, Math.PI * 2);
         ctx.fill();
 
-        // ── Breath detection flash ───────────────────────────────
+        // Breath detection flash
         if (this._breathFlash > 0) {
             ctx.beginPath();
             ctx.arc(cx, cy, orbR * 1.1, 0, Math.PI * 2);
@@ -356,22 +305,8 @@ class OrbRenderer {
         if (state && state.breath_detected) {
             this._breathFlash = 1.0;
         }
-        if (!this._breathFlash) this._breathFlash = 0;
 
         this.update(state, dt);
         this.draw();
     }
 }
-
-// ── Main ─────────────────────────────────────────────────────────────
-
-const canvas = document.getElementById('canvas');
-const renderer = new OrbRenderer(canvas);
-const conn = new Connection();
-
-function loop() {
-    renderer.render(conn.state);
-    requestAnimationFrame(loop);
-}
-
-requestAnimationFrame(loop);
