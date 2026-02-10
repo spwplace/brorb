@@ -132,6 +132,11 @@ export class OrbRenderer {
         this._heartPulse = 0;
         this._breathFlash = 0;
 
+        // Death/distress state
+        this.smoothSpo2 = 98;
+        this.smoothCO = 5.0;
+        this._isDead = false;
+
         // Particles
         this.particles = [];
         this.maxParticles = 60;
@@ -174,23 +179,49 @@ export class OrbRenderer {
                 this.smoothStress += (state.stress_index - this.smoothStress) * 0.02;
             }
 
+            // Track SpO2, cardiac output, death
+            if (state.spo2 !== undefined) {
+                this.smoothSpo2 += ((state.spo2 * 100) - this.smoothSpo2) * 0.02;
+            }
+            if (state.cardiac_output !== undefined) {
+                this.smoothCO += (state.cardiac_output - this.smoothCO) * 0.03;
+            }
+            this._isDead = (state.cardiac_rhythm === 'asystole');
+
             if (state.heartbeat) {
                 this._heartPulse = 2.0;
             }
         }
 
-        this._heartPulse *= 0.90;
+        // Suppress heartbeat pulse when dead
+        if (this._isDead) this._heartPulse *= 0.98;
+        else this._heartPulse *= 0.90;
 
         const orbR = this.baseRadius * (1 + this.smoothVolume * 0.8) + this._heartPulse;
+
+        // Particles slow when dying (lower vitality → faster decay)
+        const particleVitality = this._isDead ? 0 : Math.min(1, this.smoothCO / 3.0);
         for (let i = this.particles.length - 1; i >= 0; i--) {
             this.particles[i].update(this.cx, this.cy, orbR, this.currentPhase);
+            // Accelerate particle death when dying
+            if (particleVitality < 0.5) {
+                this.particles[i].life -= this.particles[i].decay * (1 - particleVitality);
+            }
             if (this.particles[i].life <= 0) {
-                this.particles[i].reset(this.cx, this.cy, orbR);
+                // Don't respawn particles when dead
+                if (this._isDead) {
+                    this.particles.splice(i, 1);
+                } else {
+                    this.particles[i].reset(this.cx, this.cy, orbR);
+                }
             }
         }
 
-        while (this.particles.length < this.maxParticles) {
-            this.particles.push(new Particle(this.cx, this.cy, orbR));
+        // Only spawn new particles when alive
+        if (!this._isDead) {
+            while (this.particles.length < this.maxParticles) {
+                this.particles.push(new Particle(this.cx, this.cy, orbR));
+            }
         }
     }
 
@@ -207,16 +238,37 @@ export class OrbRenderer {
         const cx = this.cx;
         const cy = this.cy;
 
-        // Color blending
+        // Color blending — with cyanosis and death effects
         const blend = this.inspireBlend;
         const satMult = 1.0 - this.smoothStress * 0.3;
 
-        const rBase = 58 + blend * 154;
-        const gBase = 110 + blend * 90;
-        const bBase = 165 - blend * 75;
-        const r = Math.round(128 + (rBase - 128) * satMult);
-        const g = Math.round(128 + (gBase - 128) * satMult);
-        const b = Math.round(128 + (bBase - 128) * satMult);
+        // Cyanosis factor: 0 at SpO2>=94, 1 at SpO2<=70
+        const cyanosis = Math.max(0, Math.min(1, (94 - this.smoothSpo2) / 24));
+
+        // Vitality: dims when cardiac output drops, dead = gray
+        const vitality = this._isDead ? 0 : Math.min(1, this.smoothCO / 3.0);
+
+        // Base colors: normal breathing blend
+        let rBase = 58 + blend * 154;
+        let gBase = 110 + blend * 90;
+        let bBase = 165 - blend * 75;
+
+        // Cyanosis shifts toward blue-purple
+        rBase = rBase * (1 - cyanosis * 0.7) + 60 * cyanosis * 0.7;
+        gBase = gBase * (1 - cyanosis * 0.6) + 40 * cyanosis * 0.6;
+        bBase = bBase * (1 - cyanosis * 0.3) + 200 * cyanosis * 0.3;
+
+        // Death: desaturate toward gray
+        const gray = (rBase + gBase + bBase) / 3;
+        rBase = rBase * vitality + gray * (1 - vitality);
+        gBase = gBase * vitality + gray * (1 - vitality);
+        bBase = bBase * vitality + gray * (1 - vitality);
+
+        // Dim overall brightness when dying
+        const brightness = 0.3 + 0.7 * vitality;
+        const r = Math.round((128 + (rBase - 128) * satMult) * brightness);
+        const g = Math.round((128 + (gBase - 128) * satMult) * brightness);
+        const b = Math.round((128 + (bBase - 128) * satMult) * brightness);
 
         // Outer glow
         const glowR = orbR * 3.0;

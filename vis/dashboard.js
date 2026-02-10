@@ -86,6 +86,7 @@ export class Dashboard {
             fAugE:   new Float32Array(600),
             pco2:    new Float32Array(600),
             hr:      new Float32Array(600),
+            spo2:    new Float32Array(600),
         };
         this.writeIdx = 0;
 
@@ -393,6 +394,46 @@ export class Dashboard {
         btns.appendChild(resetBtn);
 
         wrap.appendChild(btns);
+
+        // Event buttons (cardiac events)
+        const evtBtns = document.createElement('div');
+        evtBtns.className = 'brorb-ctrl-btns';
+        evtBtns.style.marginTop = '6px';
+
+        const miBtn = document.createElement('button');
+        miBtn.className = 'brorb-ctrl-btn';
+        miBtn.textContent = 'Heart Attack';
+        miBtn.style.color = C.rose;
+        miBtn.addEventListener('click', () => {
+            if (this.sim) this.sim.triggerHeartAttack(0.25);
+        });
+        evtBtns.appendChild(miBtn);
+
+        const respBtn = document.createElement('button');
+        respBtn.className = 'brorb-ctrl-btn';
+        respBtn.textContent = 'Resp Arrest';
+        respBtn.style.color = '#e8c040';
+        respBtn.addEventListener('click', () => {
+            if (this.sim) this.sim.triggerRespArrest();
+        });
+        evtBtns.appendChild(respBtn);
+
+        wrap.appendChild(evtBtns);
+
+        const evtBtns2 = document.createElement('div');
+        evtBtns2.className = 'brorb-ctrl-btns';
+
+        const rescueBtn = document.createElement('button');
+        rescueBtn.className = 'brorb-ctrl-btn';
+        rescueBtn.textContent = 'Resuscitate';
+        rescueBtn.style.color = C.green;
+        rescueBtn.addEventListener('click', () => {
+            if (this.sim) this.sim.resuscitate();
+        });
+        evtBtns2.appendChild(rescueBtn);
+
+        wrap.appendChild(evtBtns2);
+
         this._container.appendChild(panel);
     }
 
@@ -424,16 +465,34 @@ export class Dashboard {
         this.bufs.fAugE[i]   = state.f_augE ?? 0;
         this.bufs.pco2[i]    = state.pco2 ?? 40;
         this.bufs.hr[i]      = state.heart_rate ?? 70;
+        this.bufs.spo2[i]    = (state.spo2 ?? 0.98) * 100;
         this.writeIdx++;
 
-        // ECG
-        if (state.heartbeat) this.beatPhase = 0;
-        const rrSec = 60 / Math.max(30, state.heart_rate ?? 70);
-        const ecgVal = this.beatPhase >= 0 ? ecgWave(this.beatPhase) : 0;
-        if (this.beatPhase >= 0) {
-            this.beatPhase += (1 / 60) / rrSec;
-            if (this.beatPhase > 1) this.beatPhase = -1;
+        // ECG — morphology depends on cardiac rhythm
+        const rhythm = state.cardiac_rhythm ?? 'normal';
+        let ecgVal = 0;
+
+        if (rhythm === 'asystole') {
+            // Flat line with very occasional agonal deflections
+            ecgVal = (Math.random() < 0.002) ? (Math.random() - 0.5) * 0.3 : 0;
+        } else if (rhythm === 'vf') {
+            // Chaotic fibrillatory baseline
+            ecgVal = (Math.random() - 0.5) * 0.6 * Math.sin(this.ecgIdx * 0.8);
+        } else if (rhythm === 'vt') {
+            // Regular wide-complex tachycardia — sawtooth at ~180 bpm
+            const vtPhase = (this.ecgIdx * (180 / 60) / 60) % 1;
+            ecgVal = vtPhase < 0.3 ? (0.8 * Math.sin(vtPhase / 0.3 * Math.PI)) : -0.15;
+        } else {
+            // Normal sinus rhythm
+            if (state.heartbeat) this.beatPhase = 0;
+            const rrSec = 60 / Math.max(30, state.heart_rate ?? 70);
+            ecgVal = this.beatPhase >= 0 ? ecgWave(this.beatPhase) : 0;
+            if (this.beatPhase >= 0) {
+                this.beatPhase += (1 / 60) / rrSec;
+                if (this.beatPhase > 1) this.beatPhase = -1;
+            }
         }
+
         this.ecgBuf[this.ecgIdx % 300] = ecgVal;
         this.ecgIdx++;
     }
@@ -887,18 +946,45 @@ export class Dashboard {
 
         y += lineH;
 
-        // Chemo drive
+        // ── SpO2 ───────────────────
+        ctx.font = monoSm;
         ctx.fillStyle = C.label;
-        ctx.fillText('Chemo', x, y);
-        ctx.fillStyle = C.dim;
-        ctx.fillText(`${(state.chemo_drive ?? 0).toFixed(3)}`, x + 45, y);
+        ctx.fillText('SpO\u2082', x, y);
+        const spo2Pct = (state.spo2 ?? 0.98) * 100;
+        const spo2Color = spo2Pct >= 94 ? C.green : spo2Pct >= 88 ? '#e8c040' : C.rose;
+        ctx.fillStyle = spo2Color;
+        ctx.font = mono;
+        ctx.fillText(`${spo2Pct.toFixed(0)}%`, x + 45, y);
         y += lineH;
 
-        // Vagal tone
+        // Cardiac output
+        ctx.font = monoSm;
+        ctx.fillStyle = C.label;
+        ctx.fillText('CO', x, y);
+        ctx.fillStyle = C.dim;
+        ctx.fillText(`${(state.cardiac_output ?? 5).toFixed(1)} L/m`, x + 45, y);
+        y += lineH;
+
+        // Sympathetic / Vagal tones
+        ctx.fillStyle = C.label;
+        ctx.fillText('Symp', x, y);
+        ctx.fillStyle = C.dim;
+        ctx.fillText(`${(state.sympathetic_tone ?? 0.3).toFixed(2)}`, x + 45, y);
+        y += lineH;
+
         ctx.fillStyle = C.label;
         ctx.fillText('Vagal', x, y);
         ctx.fillStyle = C.dim;
         ctx.fillText(`${(state.vagal_tone ?? 0).toFixed(2)}`, x + 45, y);
+        y += lineH;
+
+        // Cardiac rhythm
+        const rhythm = state.cardiac_rhythm ?? 'normal';
+        if (rhythm !== 'normal') {
+            ctx.fillStyle = rhythm === 'asystole' ? C.rose : '#e8c040';
+            ctx.font = monoSm;
+            ctx.fillText(rhythm.toUpperCase(), x, y);
+        }
     }
 
     // ── Strip chart ──────────────────────────────────────────────────
@@ -914,7 +1000,8 @@ export class Dashboard {
             { buf: this.bufs.fPostI,  color: '#40c8c8', label: 'post-I', min: 0, max: 1 },
             { buf: this.bufs.fAugE,   color: '#4080d0', label: 'aug-E', min: 0, max: 1 },
             { buf: this.bufs.pco2,    color: '#60b840', label: 'CO\u2082', min: 30, max: 50 },
-            { buf: this.bufs.hr,      color: '#e06070', label: 'HR', min: 55, max: 90 },
+            { buf: this.bufs.hr,      color: '#e06070', label: 'HR', min: 40, max: 120 },
+            { buf: this.bufs.spo2,    color: '#4080d0', label: 'SpO\u2082', min: 50, max: 100 },
         ];
 
         const chH = h / channels.length;

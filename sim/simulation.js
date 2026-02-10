@@ -1,19 +1,24 @@
 /**
  * Simulation orchestrator.
  *
- * Runs the CPG + lung + chemo + heart models, driven by
+ * Runs the CPG + lung + chemo + autonomic + heart models, driven by
  * requestAnimationFrame from app.js. Returns state snapshots
  * for the renderer.
  *
  * Rate control: breathing rate is modulated by smoothly interpolating
  * tonic drives (d1, d3, d5) toward target values computed by
  * driveProfile(). Biophysical timescales are FIXED.
+ *
+ * Cerebral perfusion: cardiac output → cerebral blood flow → CPG drive
+ * scaling. When perfusion drops, inhibitory populations lose drive first,
+ * then pre-I/I fires alone (gasping), then silence (brain death).
  */
 
 import { CPGState, defaultParams, driveProfile, BASE_DRIVES, rk4Step, sigmoid } from './cpg.js';
 import { LungState, defaultLungParams, lungRk4Step, heringBreuerDrives } from './lungs.js';
 import { ChemoState, defaultChemoParams, stepChemo, chemoCpgDrives } from './chemo.js';
-import { HeartState, defaultHeartParams, stepHeart } from './heart.js';
+import { AutonomicState, defaultAutonomicParams, stepAutonomic } from './autonomic.js';
+import { HeartState, defaultHeartParams, stepHeart, triggerHeartAttack, resuscitateHeart } from './heart.js';
 
 function determinePhase(cpgY, cpgP) {
     const f1 = sigmoid(cpgY[0], cpgP.k_f, cpgP.Vh_f);
@@ -34,6 +39,8 @@ export class Simulation {
         this.lungState = new LungState();
         this.chemoState = new ChemoState();
         this.chemoParams = defaultChemoParams();
+        this.autonomicState = new AutonomicState();
+        this.autonomicParams = defaultAutonomicParams();
         this.heartState = new HeartState();
         this.heartParams = defaultHeartParams();
 
@@ -67,6 +74,14 @@ export class Simulation {
         this._phaseStartT = 0;
         this._currentPhase = 'expiration';
 
+        // Cerebral perfusion (cardiac output → brain blood flow → CPG viability)
+        this.cerebralPerfusion = 1.0;    // fraction of normal (0-1)
+        this._perfusionTau = 3.0;        // ~3s response to CO changes
+        this._normalCO = 5.0;            // normal cardiac output, L/min
+
+        // Respiratory arrest override (for "Resp Arrest" button)
+        this._respArrest = false;
+
         // Accumulator for frame-based stepping
         this._accumulator = 0;
     }
@@ -87,13 +102,35 @@ export class Simulation {
     }
 
     _step() {
-        // --- Drive interpolation (smooth transition toward target) ---
-        const alpha = 1 - Math.exp(-this.dt / this._driveInterpolTau);
-        this.cpgParams.d1 += (BASE_DRIVES.d1 + this._targetDrives.d1_offset - this.cpgParams.d1) * alpha;
-        this.cpgParams.d3 += (BASE_DRIVES.d3 + this._targetDrives.d3_offset - this.cpgParams.d3) * alpha;
-        this.cpgParams.d5 += (BASE_DRIVES.d5 + this._targetDrives.d5_offset - this.cpgParams.d5) * alpha;
+        // ── 1. Cerebral perfusion → CPG drive scaling ──────────
+        const perfTarget = Math.min(1.0, this.heartState.cardiacOutput / this._normalCO);
+        const perfAlpha = 1 - Math.exp(-this.dt / this._perfusionTau);
+        this.cerebralPerfusion += (perfTarget - this.cerebralPerfusion) * perfAlpha;
 
-        // Gather external drives from feedback loops
+        // Drive scaling: linear ramp from 0 at perf=0.1 to 1.0 at perf=0.5
+        // Below 0.5: inhibitory pops lose drive → pattern degrades
+        // Below 0.1: even INaP bursting fails → flat line
+        const perf = this.cerebralPerfusion;
+        const driveScale = this._respArrest ? 0.0
+            : perf > 0.5 ? 1.0
+            : perf > 0.1 ? (perf - 0.1) / 0.4
+            : 0.0;
+
+        // ── 2. Drive interpolation (with perfusion scaling) ────
+        const alpha = 1 - Math.exp(-this.dt / this._driveInterpolTau);
+        const targetD1 = (BASE_DRIVES.d1 + this._targetDrives.d1_offset) * driveScale;
+        const targetD3 = (BASE_DRIVES.d3 + this._targetDrives.d3_offset) * driveScale;
+        const targetD5 = (BASE_DRIVES.d5 + this._targetDrives.d5_offset) * driveScale;
+
+        this.cpgParams.d1 += (targetD1 - this.cpgParams.d1) * alpha;
+        this.cpgParams.d3 += (targetD3 - this.cpgParams.d3) * alpha;
+        this.cpgParams.d5 += (targetD5 - this.cpgParams.d5) * alpha;
+
+        // Scale the non-interpolated drives too (d2, d4 are constant normally)
+        this.cpgParams.d2 = BASE_DRIVES.d2 * driveScale;
+        this.cpgParams.d4 = BASE_DRIVES.d4 * driveScale;
+
+        // ── 3. Gather external drives from feedback loops ──────
         const hbDrives = heringBreuerDrives(this.lungState.y, this.lungParams);
         const chemDrives = chemoCpgDrives(this.chemoState);
 
@@ -104,21 +141,26 @@ export class Simulation {
             }
         }
 
+        // Scale external drives by perfusion too
+        for (const k in ext) {
+            ext[k] *= driveScale;
+        }
+
         // Add manual drive (hyper/hypoventilation)
         if (this.manualDrive !== 0) {
-            ext.drive_1 = (ext.drive_1 ?? 0) + this.manualDrive;
+            ext.drive_1 = (ext.drive_1 ?? 0) + this.manualDrive * driveScale;
         }
 
         // Entrainment pulse → post-I drive (d3) to reinforce expiratory transition
         if (this.entrainPulse > 0.01) {
-            ext.drive_3 = (ext.drive_3 ?? 0) + this.entrainPulse * this.entrainStrength;
+            ext.drive_3 = (ext.drive_3 ?? 0) + this.entrainPulse * this.entrainStrength * driveScale;
             this.entrainPulse *= this.entrainDecay;
         }
 
-        // Step CPG (RK4, mutates in place)
+        // ── 4. Step CPG (RK4) ─────────────────────────────────
         rk4Step(this.cpgState.y, this.dt, this.cpgParams, ext);
 
-        // Step lungs (RK4, mutates in place)
+        // ── 5. Step lungs (RK4) ───────────────────────────────
         lungRk4Step(this.lungState.y, this.dt, this.cpgState.y, this.lungParams, this.cpgParams);
 
         // Clamp lung state
@@ -127,7 +169,7 @@ export class Simulation {
         ly[1] = Math.max(0, ly[1]);                // x_diaph
         ly[2] = Math.max(0, ly[2]);                // v_lung
 
-        // Detect inspiration onset -> estimate BPM
+        // ── 6. Detect inspiration onset → estimate BPM ───────
         const f1 = sigmoid(this.cpgState.y[0], this.cpgParams.k_f, this.cpgParams.Vh_f);
         const isInspiring = f1 > 0.4;
         if (isInspiring && !this._wasInspiring) {
@@ -146,14 +188,30 @@ export class Simulation {
         const v = ly[2];
         this._smoothVolume += (v - this._smoothVolume) * this._volumeEmaAlpha;
 
-        // Step chemo model
+        // ── 7. Step chemo model (CO2 + O2) ────────────────────
         const ventilation = this._smoothVolume * (this._estBpm / 4.0);
         stepChemo(this.chemoState, this.dt, ventilation, this.chemoParams);
 
-        // Step heart model — CVMN receives pre-I/I (inhibitory) and post-I (excitatory)
+        // ── 8. Step autonomic model ───────────────────────────
+        stepAutonomic(
+            this.autonomicState, this.dt,
+            this.chemoState.chemoDrive,
+            this.chemoState.pao2,
+            this.heartState.cardiacOutput,
+            this.autonomicParams
+        );
+
+        // ── 9. Step heart model ───────────────────────────────
         const phase = determinePhase(this.cpgState.y, this.cpgParams);
         const fPostI = sigmoid(this.cpgState.y[2], this.cpgParams.k_f, this.cpgParams.Vh_f);
-        stepHeart(this.heartState, this.dt, v, phase, this._estBpm, f1, fPostI, this.heartParams);
+        stepHeart(
+            this.heartState, this.dt, v, phase, this._estBpm,
+            f1, fPostI,
+            this.autonomicState.sympatheticTone,
+            this.autonomicState.vagalModulation,
+            this.chemoState.pao2,
+            this.heartParams
+        );
 
         this.t += this.dt;
         this.stepCount++;
@@ -189,13 +247,29 @@ export class Simulation {
             ramp_I: this.lungState.y[0],
             breath_detected: this.breathDetected,
             t: this.t,
+
+            // Gas exchange
             pco2: this.chemoState.paco2,
+            pao2: this.chemoState.pao2,
+            spo2: this.chemoState.spo2,
             chemo_drive: this.chemoState.chemoDrive,
+
+            // Autonomic
+            sympathetic_tone: this.autonomicState.sympatheticTone,
             vagal_tone: this.heartState.cvmnActivity,
+
+            // Cardiac
             heart_rate: this.heartState.currentHr,
             rsa_amplitude: this.heartState.rsaAmplitude,
             heartbeat: this.heartState.heartbeat,
             stress_index: this.heartState.stressIndex,
+            cardiac_output: this.heartState.cardiacOutput,
+            cardiac_rhythm: this.heartState.cardiacRhythm,
+            stroke_volume: this.heartState.strokeVolume,
+
+            // Perfusion
+            cerebral_perfusion: this.cerebralPerfusion,
+
             est_bpm: this._estBpm,
         };
 
@@ -218,5 +292,21 @@ export class Simulation {
         // Smoothly interpolate drives — does NOT recreate params
         this._targetBpm = bpm;
         this._targetDrives = driveProfile(bpm);
+    }
+
+    // ── Cardiac event triggers ────────────────────────────────
+
+    triggerHeartAttack(severity = 0.3) {
+        triggerHeartAttack(this.heartState, severity);
+    }
+
+    triggerRespArrest() {
+        this._respArrest = true;
+    }
+
+    resuscitate() {
+        this._respArrest = false;
+        resuscitateHeart(this.heartState);
+        // Restore cerebral perfusion target will follow naturally from CO recovery
     }
 }

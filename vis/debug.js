@@ -207,6 +207,8 @@ export class DebugPanel {
 
         ctx.fillStyle = '#667788';
         ctx.font = '9px monospace';
-        ctx.fillText(`Chemo: ${(state.chemo_drive || 0).toFixed(3)}  Vagal: ${(state.vagal_tone || 0).toFixed(2)}`, 8, y + 2);
+        ctx.fillText(`Chemo: ${(state.chemo_drive || 0).toFixed(3)}  Vagal: ${(state.vagal_tone || 0).toFixed(2)}  Symp: ${(state.sympathetic_tone || 0).toFixed(2)}`, 8, y + 2);
+        y += 12;
+        ctx.fillText(`SpO2: ${((state.spo2 || 0.98) * 100).toFixed(0)}%  CO: ${(state.cardiac_output || 5).toFixed(1)}L/m  Perf: ${(state.cerebral_perfusion || 1).toFixed(2)}`, 8, y + 2);
     }
 }
